@@ -1,6 +1,6 @@
 import Foundation
 
-struct FranfurterResponse: Decodable {
+struct FrankfurterResponse: Decodable {
     let rates: [String: Double]
     let date: String
 }
@@ -24,27 +24,38 @@ class CurrencyService {
 
     private init() {}
 
-    /// Fetches the historical conversion rate between two currencies on a given date.
-    func fetchConversion(from: String, to: String, date: Date) async throws -> Double {
+    func fetchConversion(from: String, to: String, date: Date, maxTries: Int = 7) async throws -> (rate: Double, actualDate: Date) {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
-        let dateString = formatter.string(from: date)
 
-        // Franfurter API docs: https://www.frankfurter.app/docs/
-        let urlString = "https://api.frankfurter.app/\(dateString)?from=\(from)&to=\(to)"
-        guard let url = URL(string: urlString) else {
-            throw CurrencyServiceError.invalidResponse
+        var trialDate = date
+        for _ in 0..<maxTries {
+            let dateString = formatter.string(from: trialDate)
+            let urlString = "https://api.frankfurter.app/\(dateString)?from=\(from)&to=\(to)"
+            guard let url = URL(string: urlString) else {
+                throw CurrencyServiceError.invalidResponse
+            }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    throw CurrencyServiceError.network
+                }
+                let decoded = try JSONDecoder().decode(FrankfurterResponse.self, from: data)
+                if let rate = decoded.rates[to] {
+                    return (rate, formatter.date(from: decoded.date) ?? trialDate)
+                }
+            } catch let error as CurrencyServiceError {
+                if case .network = error {
+                    throw error
+                }
+                // For all other errors, try previous day
+            } catch {
+                // e.g. network or decoding error
+                throw CurrencyServiceError.network
+            }
+            // Subtract one day and try again
+            trialDate = Calendar.current.date(byAdding: .day, value: -1, to: trialDate) ?? trialDate
         }
-
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            throw CurrencyServiceError.network
-        }
-
-        let decoded = try JSONDecoder().decode(FranfurterResponse.self, from: data)
-        guard let rate = decoded.rates[to] else {
-            throw CurrencyServiceError.rateNotFound
-        }
-        return rate
+        throw CurrencyServiceError.rateNotFound
     }
 }
